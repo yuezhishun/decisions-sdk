@@ -3,7 +3,7 @@
     <TargetFramework>net11.0</TargetFramework>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
-    <PackageId>Codex.Decisions</PackageId>
+    <PackageId>Decisions.Codex</PackageId>
     <Version>1.0.0-rc.1</Version>
     <Authors>Yue Zhishun</Authors>
     <Description>通过本机 Codex App Server 提供 OpenAI Decisions、Jev System One 和结构化回答。</Description>

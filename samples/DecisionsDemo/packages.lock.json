@@ -46,7 +46,7 @@
         "resolved": "10.0.3",
         "contentHash": "MaGhRfGunmrj/nHjtsi9XkhlYJ/ERGWrbA+BiSKNtGnAjc9XlG5EhAvak6VRcX5LYzPF6pBO8nJ613dTgzabig=="
       },
-      "codex.decisions": {
+      "Decisions.Codex": {
         "type": "Project"
       },
       "deepseek.decisions": {

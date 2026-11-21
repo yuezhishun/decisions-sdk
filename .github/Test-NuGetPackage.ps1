@@ -1,13 +1,14 @@
 param(
     [Parameter(Mandatory)]
-    [ValidateSet('Codex.Decisions', 'DeepSeek.Decisions')]
+    [ValidateSet('Decisions.Codex', 'DeepSeek.Decisions')]
     [string]$Package,
 
     [string]$Tag = ''
 )
 
 $ErrorActionPreference = 'Stop'
-$project = "src/$Package/$Package.csproj"
+$projectName = if ($Package -ceq 'Decisions.Codex') { 'Codex.Decisions' } else { $Package }
+$project = "src/$projectName/$projectName.csproj"
 $propertiesJson = dotnet msbuild $project -nologo '-getProperty:PackageId,Version,TargetFramework'
 if ($LASTEXITCODE -ne 0) { throw "Could not read properties from $project." }
 
@@ -23,7 +24,7 @@ if ($Tag -and $Tag -cne "$Package/v$version") {
 }
 
 $install = "dotnet add package $Package --version $version"
-foreach ($readme in @('README.md', 'README_CN.md', "src/$Package/README.md")) {
+foreach ($readme in @('README.md', 'README_CN.md', "src/$projectName/README.md")) {
     if ((Get-Content -LiteralPath $readme) -cnotcontains $install) {
         throw "$readme must contain the install command '$install'."
     }
@@ -61,11 +62,11 @@ try {
         throw "The packaged README must contain the install command '$install'."
     }
 
-    $entry = $archive.GetEntry("lib/$($properties.TargetFramework)/$Package.dll")
+    $entry = $archive.GetEntry("lib/$($properties.TargetFramework)/$projectName.dll")
     [IO.Compression.ZipFileExtensions]::ExtractToFile($entry, $assembly.FullName, $true)
     $compiled = [Reflection.AssemblyName]::GetAssemblyName($assembly.FullName)
     $fileVersion = [Diagnostics.FileVersionInfo]::GetVersionInfo($assembly.FullName).FileVersion
-    if ($compiled.Name -cne $Package -or $compiled.Version.ToString() -cne $assemblyVersion -or
+    if ($compiled.Name -cne $projectName -or $compiled.Version.ToString() -cne $assemblyVersion -or
         $fileVersion -cne $assemblyVersion) {
         throw "Unexpected assembly or file version in $path."
     }
