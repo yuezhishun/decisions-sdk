@@ -2,7 +2,7 @@
   "version": 2,
   "dependencies": {
     "net11.0": {
-      "codex.decisions": {
+      "Decisions.Codex": {
         "type": "Project"
       }
     }

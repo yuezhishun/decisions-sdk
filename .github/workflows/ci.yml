@@ -44,7 +44,7 @@ jobs:
       - name: Validate both NuGet packages
         shell: pwsh
         run: |
-          ./.github/Test-NuGetPackage.ps1 -Package Codex.Decisions
+          ./.github/Test-NuGetPackage.ps1 -Package Decisions.Codex
           ./.github/Test-NuGetPackage.ps1 -Package DeepSeek.Decisions
 
       - name: Upload test results

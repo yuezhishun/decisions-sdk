@@ -3,7 +3,7 @@ name: Publish NuGet
 on:
   push:
     tags:
-      - 'Codex.Decisions/v*'
+      - 'Decisions.Codex/v*'
       - 'DeepSeek.Decisions/v*'
   workflow_dispatch:
     inputs:
@@ -12,7 +12,7 @@ on:
         required: true
         type: choice
         options:
-          - Codex.Decisions
+          - Decisions.Codex
           - DeepSeek.Decisions
 
 permissions: {}
@@ -45,8 +45,8 @@ jobs:
           fi
 
           case "$SELECTED_PACKAGE" in
-            Codex.Decisions|DeepSeek.Decisions) ;;
-            *) echo "::error::Select Codex.Decisions or DeepSeek.Decisions."; exit 1 ;;
+            Decisions.Codex|DeepSeek.Decisions) ;;
+            *) echo "::error::Select Decisions.Codex or DeepSeek.Decisions."; exit 1 ;;
           esac
           echo "package=$SELECTED_PACKAGE" >> "$GITHUB_OUTPUT"
 
