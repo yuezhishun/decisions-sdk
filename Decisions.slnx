@@ -1,0 +1,20 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/Codex.Decisions/Codex.Decisions.csproj" />
+    <Project Path="src/DeepSeek.Decisions/DeepSeek.Decisions.csproj" />
+  </Folder>
+  <Folder Name="/test/">
+    <Project Path="test/DeepSeek.Decisions.UnitTests/DeepSeek.Decisions.UnitTests.csproj" />
+    <Project Path="test/DeepSeek.Decisions.IntegrationTests/DeepSeek.Decisions.IntegrationTests.csproj" />
+  </Folder>
+  <Folder Name="/benchmark/">
+    <Project Path="benchmark/DeepSeek.Decisions.Benchmarks/DeepSeek.Decisions.Benchmarks.csproj" />
+  </Folder>
+  <Folder Name="/samples/">
+    <Project Path="samples/DecisionsDemo/DecisionsDemo.csproj" />
+  </Folder>
+  <Folder Name="/scripts/">
+    <Project Path="scripts/codex-fixture/CodexFixture.csproj" />
+    <Project Path="scripts/decisions-demo-sdk/DecisionsDemoSdk.csproj" />
+  </Folder>
+</Solution>

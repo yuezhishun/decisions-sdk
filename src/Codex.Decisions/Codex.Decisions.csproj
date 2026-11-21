@@ -1,0 +1,21 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net11.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <PackageId>Codex.Decisions</PackageId>
+    <Version>1.0.0-rc.1</Version>
+    <Authors>Yue Zhishun</Authors>
+    <Description>通过本机 Codex App Server 提供 OpenAI Decisions、Jev System One 和结构化回答。</Description>
+    <PackageProjectUrl>https://github.com/yuezhishun/decisions-sdk</PackageProjectUrl>
+    <RepositoryUrl>https://github.com/yuezhishun/decisions-sdk</RepositoryUrl>
+    <RepositoryType>git</RepositoryType>
+    <PackageLicenseExpression>MIT</PackageLicenseExpression>
+    <PackageReadmeFile>README.md</PackageReadmeFile>
+    <IncludeSymbols>true</IncludeSymbols>
+    <SymbolPackageFormat>snupkg</SymbolPackageFormat>
+  </PropertyGroup>
+  <ItemGroup>
+    <None Include="README.md" Pack="true" PackagePath="/" />
+  </ItemGroup>
+</Project>

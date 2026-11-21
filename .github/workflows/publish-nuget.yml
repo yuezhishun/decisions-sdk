@@ -1,0 +1,151 @@
+name: Publish NuGet
+
+on:
+  push:
+    tags:
+      - 'Codex.Decisions/v*'
+      - 'DeepSeek.Decisions/v*'
+  workflow_dispatch:
+    inputs:
+      package:
+        description: Package to validate
+        required: true
+        type: choice
+        options:
+          - Codex.Decisions
+          - DeepSeek.Decisions
+
+permissions: {}
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Select the package
+        id: release
+        env:
+          SELECTED_PACKAGE: ${{ inputs.package }}
+        run: |
+          if [[ "$GITHUB_EVENT_NAME" == "push" ]]; then
+            if [[ "$(git cat-file -t "$GITHUB_REF")" != "tag" ]]; then
+              echo "::error::NuGet releases require an annotated tag."
+              exit 1
+            fi
+            tag_name="${GITHUB_REF#refs/tags/}"
+            SELECTED_PACKAGE="${tag_name%%/*}"
+          fi
+
+          case "$SELECTED_PACKAGE" in
+            Codex.Decisions|DeepSeek.Decisions) ;;
+            *) echo "::error::Select Codex.Decisions or DeepSeek.Decisions."; exit 1 ;;
+          esac
+          echo "package=$SELECTED_PACKAGE" >> "$GITHUB_OUTPUT"
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@0f4a354dd5547a28c70b7853dbd95d5b67886e73 # v6.1.0
+        with:
+          dotnet-version: |
+            8.0.x
+            10.0.x
+            11.0.100
+
+      - name: Build
+        run: dotnet build Decisions.slnx -c Release -p:ContinuousIntegrationBuild=true
+
+      - name: Test without service credentials
+        run: >-
+          dotnet test Decisions.slnx -c Release --no-build
+          --filter 'Category!=Live' --logger trx --results-directory artifacts/test-results
+
+      - name: Test demo with local fixtures
+        run: >-
+          python3 scripts/test-decisions-demo.py
+          samples/DecisionsDemo/bin/Release/net11.0/DecisionsDemo.dll
+          scripts/codex-fixture/bin/Release/net11.0/CodexFixture
+          scripts/decisions-demo-sdk/bin/Release/net11.0/DecisionsDemoSdk.dll
+
+      - name: Validate the selected NuGet package
+        env:
+          RELEASE_PACKAGE: ${{ steps.release.outputs.package }}
+        shell: pwsh
+        run: |
+          $tag = if ($env:GITHUB_EVENT_NAME -eq 'push') { $env:GITHUB_REF_NAME } else { '' }
+          ./.github/Test-NuGetPackage.ps1 -Package $env:RELEASE_PACKAGE -Tag $tag
+
+      - name: Test DeepSeek.Decisions on .NET 10 and 11
+        if: steps.release.outputs.package == 'DeepSeek.Decisions'
+        shell: pwsh
+        env:
+          DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+          DEEPSEEK_REQUIRE_LIVE_TESTS: 'true'
+        run: |
+          if ([string]::IsNullOrWhiteSpace($env:DEEPSEEK_API_KEY) -or $env:DEEPSEEK_API_KEY -eq 'test-key') {
+            throw 'Set the DEEPSEEK_API_KEY repository secret to a valid test credential.'
+          }
+
+          $project = 'test/DeepSeek.Decisions.IntegrationTests/DeepSeek.Decisions.IntegrationTests.csproj'
+          foreach ($framework in @('net10.0', 'net11.0')) {
+            $log = "live-$framework.trx"
+            dotnet test $project -c Release "-p:CompatibilityTargetFramework=$framework" --filter 'Category=Live' --logger "trx;LogFileName=$log" --results-directory artifacts/test-results
+            if ($LASTEXITCODE -ne 0) { throw "Live tests failed on $framework." }
+            $counters = ([xml](Get-Content -Raw "artifacts/test-results/$log")).TestRun.ResultSummary.Counters
+            if ([int]$counters.passed -lt 4 -or [int]$counters.passed -ne [int]$counters.total) {
+              throw "At least four live tests must run and pass on $framework."
+            }
+          }
+
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: release-test-results
+          path: artifacts/test-results
+
+      - name: Upload the validated NuGet package
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: validated-nuget-package
+          path: artifacts/packages/*.nupkg
+          if-no-files-found: error
+
+  publish:
+    if: github.event_name == 'push'
+    needs: validate
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+
+    steps:
+      - name: Download the validated NuGet package
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: validated-nuget-package
+          path: artifacts/packages
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@0f4a354dd5547a28c70b7853dbd95d5b67886e73 # v6.1.0
+        with:
+          dotnet-version: 11.0.100
+
+      - name: NuGet login with trusted publishing
+        uses: NuGet/login@8d196754b4036150537f80ac539e15c2f1028841 # v1.2.0
+        id: nuget-login
+        with:
+          user: yueyuan
+
+      - name: Push the selected package to NuGet.org
+        env:
+          NUGET_API_KEY: ${{ steps.nuget-login.outputs.NUGET_API_KEY }}
+        run: >-
+          dotnet nuget push artifacts/packages/*.nupkg
+          --api-key "$NUGET_API_KEY" --source https://api.nuget.org/v3/index.json
+          --skip-duplicate --no-symbols

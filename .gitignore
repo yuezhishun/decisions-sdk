@@ -1,0 +1,15 @@
+.vs/
+**/bin/
+**/obj/
+**/pack/
+**/TestResults/
+**/__pycache__/
+/artifacts/
+.env
+*.env
+*.user
+*.suo
+*.binlog
+*.nupkg
+*.snupkg
+/sample/appsettings.json

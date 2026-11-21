@@ -1,0 +1,55 @@
+name: Offline CI
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  offline:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@0f4a354dd5547a28c70b7853dbd95d5b67886e73 # v6.1.0
+        with:
+          dotnet-version: |
+            8.0.x
+            10.0.x
+            11.0.100
+
+      - name: Build
+        run: dotnet build Decisions.slnx -c Release -p:ContinuousIntegrationBuild=true
+
+      - name: Test without service credentials
+        run: >-
+          dotnet test Decisions.slnx -c Release --no-build
+          --filter 'Category!=Live' --logger trx --results-directory artifacts/test-results
+
+      - name: Test demo with local fixtures
+        run: >-
+          python3 scripts/test-decisions-demo.py
+          samples/DecisionsDemo/bin/Release/net11.0/DecisionsDemo.dll
+          scripts/codex-fixture/bin/Release/net11.0/CodexFixture
+          scripts/decisions-demo-sdk/bin/Release/net11.0/DecisionsDemoSdk.dll
+
+      - name: Validate both NuGet packages
+        shell: pwsh
+        run: |
+          ./.github/Test-NuGetPackage.ps1 -Package Codex.Decisions
+          ./.github/Test-NuGetPackage.ps1 -Package DeepSeek.Decisions
+
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: offline-test-results
+          path: artifacts/test-results
