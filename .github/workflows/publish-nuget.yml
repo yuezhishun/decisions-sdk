@@ -131,11 +131,6 @@ jobs:
           name: validated-nuget-package
           path: artifacts/packages
 
-      - name: Setup .NET
-        uses: actions/setup-dotnet@0f4a354dd5547a28c70b7853dbd95d5b67886e73 # v6.1.0
-        with:
-          dotnet-version: 11.0.100
-
       - name: NuGet login with trusted publishing
         uses: NuGet/login@8d196754b4036150537f80ac539e15c2f1028841 # v1.2.0
         id: nuget-login
@@ -145,7 +140,14 @@ jobs:
       - name: Push the selected package to NuGet.org
         env:
           NUGET_API_KEY: ${{ steps.nuget-login.outputs.NUGET_API_KEY }}
-        run: >-
-          dotnet nuget push artifacts/packages/*.nupkg
-          --api-key "$NUGET_API_KEY" --source https://api.nuget.org/v3/index.json
-          --skip-duplicate --no-symbols
+        run: |
+          packages=(artifacts/packages/*.nupkg)
+          if [[ "${#packages[@]}" -ne 1 || ! -f "${packages[0]}" ]]; then
+            echo "::error::Expected exactly one validated NuGet package."
+            exit 1
+          fi
+          curl --silent --show-error --fail-with-body --request PUT \
+            --header "X-NuGet-ApiKey: $NUGET_API_KEY" \
+            --form "package=@${packages[0]};type=application/octet-stream" \
+            --write-out '\nNuGet upload HTTP %{http_code}\n' \
+            https://www.nuget.org/api/v2/package
