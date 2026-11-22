@@ -11,6 +11,8 @@ $env:DECISIONS_DEMO_API_KEY = 'local-demo-key'
 $env:DecisionsDemo__DeepSeekModel = 'deepseek-flash'
 # 可选。省略时使用本机 Codex 默认模型与 PATH 中的 CLI。
 $env:DecisionsDemo__CodexModel = 'gpt-6-luna'
+# 可选。档位须由所选 Codex 模型支持。
+# $env:DecisionsDemo__CodexReasoningEffort = 'low'
 # GET /models 需要填写所配置模型的实际发布日期。
 # $env:DecisionsDemo__DeepSeekReleaseDate = 'yyyy-MM-dd'
 # $env:DecisionsDemo__CodexReleaseDate = 'yyyy-MM-dd'
@@ -18,6 +20,8 @@ dotnet run --project samples/DecisionsDemo -c Release
 ```
 
 默认只监听 `127.0.0.1:3090`，可通过 `DecisionsDemo__Port` 改端口。可设置 `DecisionsDemo__CodexExecutable` 指向 Codex CLI，或通过 `DecisionsDemo__DeepSeekEndpoint` 指向受控测试服务。
+
+省略 `DecisionsDemo__CodexReasoningEffort` 时，模型支持 `low` 就使用 `low`，否则由 Codex App Server 决定默认档位。填写模型不支持的档位会在首次使用 Codex 后端时返回错误。
 
 | 后端 | Base URL |
 | --- | --- |

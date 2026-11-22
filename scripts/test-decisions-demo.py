@@ -2,6 +2,7 @@
 
 import argparse
 import base64
+from contextlib import contextmanager
 import gzip
 import http.client
 import json
@@ -219,6 +220,37 @@ def verify_cancel(port, fixture):
     assert fixture.cancelled.wait(10), "The downstream connection did not close after client cancellation."
 
 
+@contextmanager
+def run_demo(demo, stage, port, env):
+    logfile = stage / "demo.log"
+    with logfile.open("wb") as log:
+        process = subprocess.Popen(["dotnet", str(demo)], cwd=stage, env=env, stdout=log, stderr=subprocess.STDOUT,
+                                   creationflags=subprocess.CREATE_NEW_PROCESS_GROUP if os.name == "nt" else 0)
+        try:
+            deadline = time.monotonic() + 20
+            while True:
+                try:
+                    if request(port, "/deepseek/v1/models")[0] == 200:
+                        break
+                except OSError:
+                    pass
+                if process.poll() is not None or time.monotonic() > deadline:
+                    raise AssertionError("Demo did not start.")
+                time.sleep(0.1)
+            yield
+        except Exception:
+            print("\n".join(logfile.read_text(encoding="utf-8", errors="replace").splitlines()[-35:]))
+            raise
+        finally:
+            if process.poll() is None:
+                try:
+                    process.send_signal(signal.CTRL_BREAK_EVENT if os.name == "nt" else signal.SIGTERM)
+                    process.wait(timeout=10)
+                except (OSError, subprocess.TimeoutExpired):
+                    process.kill()
+                    process.wait(timeout=10)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("demo", type=Path)
@@ -240,33 +272,23 @@ def main():
         with socket.socket() as listener:
             listener.bind(("127.0.0.1", 0))
             port = listener.getsockname()[1]
-        env = dict(os.environ, DECISIONS_DEMO_API_KEY=KEY, DEEPSEEK_API_KEY="controlled-provider-key",
+        inherited = {name: value for name, value in os.environ.items()
+                     if name.casefold() != "decisionsdemo__codexreasoningeffort"}
+        env = dict(inherited, DECISIONS_DEMO_API_KEY=KEY, DEEPSEEK_API_KEY="controlled-provider-key",
                    SAG_FIXTURE_FORBIDDEN_ENVIRONMENT="DECISIONS_DEMO_API_KEY",
                    DecisionsDemo__Port=str(port), DecisionsDemo__CodexExecutable=str(executable),
                    DecisionsDemo__CodexModel=MODELS["codex"], DecisionsDemo__DeepSeekModel=MODELS["deepseek"],
                    DecisionsDemo__DeepSeekEndpoint=f"http://127.0.0.1:{provider.server_port}/",
                    DecisionsDemo__CodexReleaseDate="2026-01-01", DecisionsDemo__DeepSeekReleaseDate="2026-01-01",
                    NO_PROXY="127.0.0.1,localhost")
-        logfile = stage / "demo.log"
-        process = None
+        events = fixture_folder / "events.jsonl"
         try:
-            with logfile.open("wb") as log:
-                process = subprocess.Popen(["dotnet", str(demo)], cwd=stage, env=env, stdout=log, stderr=subprocess.STDOUT,
-                                           creationflags=subprocess.CREATE_NEW_PROCESS_GROUP if os.name == "nt" else 0)
-                deadline = time.monotonic() + 20
-                while True:
-                    try:
-                        if request(port, "/deepseek/v1/models")[0] == 200:
-                            break
-                    except OSError:
-                        pass
-                    if process.poll() is not None or time.monotonic() > deadline:
-                        raise AssertionError("Demo did not start.")
-                    time.sleep(0.1)
+            with run_demo(demo, stage, port, env):
                 verify_backend(port, "codex", MODELS["codex"])
                 verify_backend(port, "deepseek", MODELS["deepseek"])
-                calls = [json.loads(line) for line in (fixture_folder / "events.jsonl").read_text(encoding="utf-8").splitlines()]
+                calls = [json.loads(line) for line in events.read_text(encoding="utf-8").splitlines()]
                 assert any(event["phase"] == "protocol" and event["images"] > 0 for event in calls)
+                assert all(event["effort"] == "low" for event in calls if event["phase"] == "protocol"), calls
                 assert any(event["phase"] == "history" and
                            [item["type"] for item in event["items"]].count("custom_tool_call_output") == 1
                            for event in calls)
@@ -288,18 +310,21 @@ def main():
                                      capture_output=True, text=True, encoding="utf-8")
                 assert sdk.returncode == 0, sdk.stdout + sdk.stderr
                 print(sdk.stdout, end="")
-                print("OpenAI and Jev passed on both backends, including multipart, gzip, x-gzip, zstd, errors and cancellation.")
-        except Exception:
-            print("\n".join(logfile.read_text(encoding="utf-8", errors="replace").splitlines()[-35:]))
-            raise
+            model = "gpt-6.2-sol"
+            effort_env = dict(env, DecisionsDemo__CodexModel=model, DecisionsDemo__CodexReasoningEffort="medium")
+            with run_demo(demo, stage, port, effort_env):
+                status, result = request(port, "/codex/v1/systemone", jev_request(model))
+                assert status == 200 and result["model"] == model, (status, result)
+                turn = json.loads(events.read_text(encoding="utf-8").splitlines()[-1])
+                assert (turn["phase"], turn["model"], turn["effort"]) == ("protocol", model, "medium"), turn
+            turns_before = events.read_bytes()
+            effort_env["DecisionsDemo__CodexReasoningEffort"] = "high"
+            with run_demo(demo, stage, port, effort_env):
+                status, error = request(port, "/codex/v1/systemone", jev_request(model))
+                assert status == 502, (status, error)
+                assert events.read_bytes() == turns_before, "Unsupported reasoning effort started a Codex turn."
+            print("OpenAI and Jev passed on both backends, including Codex reasoning effort, multipart, gzip, x-gzip, zstd, errors and cancellation.")
         finally:
-            if process is not None and process.poll() is None:
-                try:
-                    process.send_signal(signal.CTRL_BREAK_EVENT if os.name == "nt" else signal.SIGTERM)
-                    process.wait(timeout=10)
-                except (OSError, subprocess.TimeoutExpired):
-                    process.kill()
-                    process.wait(timeout=10)
             provider.shutdown()
 
 

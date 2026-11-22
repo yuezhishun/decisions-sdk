@@ -54,7 +54,7 @@ public sealed partial class CodexAppServer : IAsyncDisposable
         IReadOnlyList<string> privateEnvironment, CancellationToken ct) =>
         StartAsync(executable, model, privateEnvironment, null, ct);
 
-    internal static async Task<CodexAppServer> StartAsync(string? executable, string? model,
+    public static async Task<CodexAppServer> StartAsync(string? executable, string? model,
         IReadOnlyList<string> privateEnvironment, string? reasoningEffort, CancellationToken ct)
     {
         var client = new CodexAppServer(executable, privateEnvironment, reasoningEffort) { Model = model?.Trim() ?? "" };

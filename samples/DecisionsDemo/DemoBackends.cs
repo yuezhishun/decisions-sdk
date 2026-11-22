@@ -74,8 +74,10 @@ internal sealed class DemoBackends : IAsyncDisposable
         await codexGate.WaitAsync(ct);
         try
         {
+            var effort = settings["CodexReasoningEffort"];
             return codex ??= await CodexAppServer.StartAsync(settings["CodexExecutable"], settings["CodexModel"],
-                ["DECISIONS_DEMO_API_KEY", "DEEPSEEK_API_KEY", "OPENAI_API_KEY"], ct);
+                ["DECISIONS_DEMO_API_KEY", "DEEPSEEK_API_KEY", "OPENAI_API_KEY"],
+                string.IsNullOrWhiteSpace(effort) ? null : effort, ct);
         }
         finally { codexGate.Release(); }
     }

@@ -180,7 +180,8 @@ while (Console.ReadLine() is { } line)
                     throw new InvalidOperationException("Unexpected response schema.");
                 if (mode != "workflow-evals")
                     File.AppendAllText(events, JsonSerializer.Serialize(new { mode, phase = protocol ? "protocol" : scoring ? "score" : "answer",
-                        model = activeModel, images = parameters.GetProperty("input").EnumerateArray()
+                        model = activeModel, effort = parameters.TryGetProperty("effort", out var effort) ? effort.GetString() : null,
+                        images = parameters.GetProperty("input").EnumerateArray()
                             .Count(item => item.GetProperty("type").GetString() == "image") }) + "\n");
                 if (mode == "early-model-rerouted")
                 {
