@@ -3,7 +3,7 @@
 `Decisions.Codex` 在 .NET 11 上通过本机 Codex App Server 提供 OpenAI Decisions 和 Jev System One 协议适配以及结构化回答。C# 命名空间为 `Codex.Decisions`。安装 Codex CLI 并登录后，可从 `PATH` 启动它，也可指定可执行文件路径。
 
 ```sh
-dotnet add package Decisions.Codex --version 1.0.0-rc.1
+dotnet add package Decisions.Codex --version 1.0.0
 ```
 
 ```csharp

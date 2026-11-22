@@ -1,0 +1,20 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net11.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <IsPackable>false</IsPackable>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="../DeepSeek.Decisions.Benchmarks/DeepSeek.Decisions.Benchmarks.csproj" />
+    <ProjectReference Include="../../src/Codex.Decisions/Codex.Decisions.csproj" />
+    <ProjectReference Include="../../scripts/codex-fixture/CodexFixture.csproj" ReferenceOutputAssembly="false" OutputItemType="ReplayFixture" />
+  </ItemGroup>
+  <Target Name="CopyReplayFixture" AfterTargets="Build">
+    <ItemGroup>
+      <ReplayFixtureFile Include="%(ReplayFixture.RootDir)%(ReplayFixture.Directory)CodexFixture*" />
+    </ItemGroup>
+    <Copy SourceFiles="@(ReplayFixtureFile)" DestinationFolder="$(OutDir)fixture" SkipUnchangedFiles="true" />
+  </Target>
+</Project>

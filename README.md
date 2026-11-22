@@ -7,13 +7,13 @@
 | [Decisions.Codex](src/Codex.Decisions/README.md) | .NET 11 | Local Codex App Server |
 | [DeepSeek.Decisions](src/DeepSeek.Decisions/README.md) | .NET Standard 2.0 | DeepSeek Chat Completions via [DeepSeek.Core](https://github.com/yuezhishun/deepseek-sdk) |
 
-See the [Chinese guide](README_CN.md), the [dual-protocol demo](samples/DecisionsDemo/README.md), and the [WorkflowEvals benchmark](benchmark/DeepSeek.Decisions.Benchmarks/README.md).
+See the [Chinese guide](README_CN.md), the [dual-protocol demo](samples/DecisionsDemo/README.md), the [DeepSeek WorkflowEvals benchmark](benchmark/DeepSeek.Decisions.Benchmarks/README.md), and the [Codex WorkflowEvals replay](benchmark/Codex.Decisions.Benchmarks/README.md).
 
 ## Installation
 
 ```shell
-dotnet add package Decisions.Codex --version 1.0.0-rc.1
-dotnet add package DeepSeek.Decisions --version 1.2.0
+dotnet add package Decisions.Codex --version 1.0.0
+dotnet add package DeepSeek.Decisions --version 1.2.1
 ```
 
 Check [Decisions.Codex](https://www.nuget.org/packages/Decisions.Codex) and [DeepSeek.Decisions](https://www.nuget.org/packages/DeepSeek.Decisions) for published versions. Build from this repository to try a version before it appears on NuGet.

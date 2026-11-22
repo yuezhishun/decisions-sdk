@@ -33,11 +33,13 @@ internal static class Answers
     }
 }
 
-// 固定输入、模型读数和运行记录在此交汇；回放客户端不会创建网络传输。
-internal sealed class WorkflowSession(JsonObject? replay = null, Func<string, JsonNode, JsonObject, Task<Dictionary<string, SystemOneAnswer>>>? ask = null)
+// 回放先校验公开问题和状态，再将答案交给工作流。
+internal sealed class WorkflowSession(JsonObject? replay = null,
+    Func<string, JsonNode, JsonObject, Task<Dictionary<string, SystemOneAnswer>>>? ask = null,
+    Func<string, JsonNode, JsonObject, Dictionary<string, SystemOneAnswer>, Task<Dictionary<string, SystemOneAnswer>>>? transport = null)
 {
     internal JsonArray Calls { get; } = [];
-    private readonly HashSet<string> _read = [];
+    private readonly HashSet<(string Node, string Question)> _read = [];
     internal async Task<Dictionary<string, SystemOneAnswer>> Ask(string node, JsonNode state, JsonObject questions)
     {
         var call = J.O(("node_id", node), ("state", state), ("questions", questions));
@@ -61,7 +63,13 @@ internal sealed class WorkflowSession(JsonObject? replay = null, Func<string, Js
                 if (J.Canonical(actualQuestion) != J.Canonical(expectedQuestion) || J.Canonical(state) != J.Canonical(JsonNode.Parse(row.S("state_json"))!))
                     throw new InvalidDataException($"回放输入不一致：{node}/{id}；question_match={J.Canonical(actualQuestion) == J.Canonical(expectedQuestion)}；state_match={J.Canonical(state) == J.Canonical(JsonNode.Parse(row.S("state_json"))!)}");
                 answers[id] = Answers.Read(row, question!);
-                _read.Add(node + "/" + id);
+                if (!_read.Add((node, id))) throw new InvalidDataException($"重复回放题目：{node}/{id}");
+            }
+            if (transport is not null)
+            {
+                answers = await transport(node, state, questions, answers);
+                if (!answers.Keys.ToHashSet().SetEquals(questions.Select(q => q.Key)))
+                    throw new InvalidDataException($"SDK 返回的题目 ID 不一致：{node}");
             }
         }
         else answers = await (ask ?? throw new InvalidOperationException("没有模型读取器。"))(node, state, questions);
@@ -102,18 +110,73 @@ internal static class Workflows
                 JsonArray actual;
                 try { actual = await Run(data, c, session); session.AssertComplete(); }
                 catch (Exception ex) { throw new InvalidDataException($"{data.Name}/{c.S("case_id")}: {ex.Message}", ex); }
-                foreach (var expected in recorded["decisions"].Items())
-                {
-                    var a = actual.Single(d => d.S("policy_id") == expected.S("policy_id"))!;
-                    if (!Scoring.Exact(a["actions"], expected["actions"]) || expected["primary_action"] is not null && !Scoring.Same(a["primary_action"], expected["primary_action"]))
-                        throw new InvalidDataException($"回放动作不符：{data.Name}/{c.S("case_id")}/{expected.S("policy_id")}；actual={a}；expected={expected}");
-                    decisions++;
-                }
+                if (DecisionMismatch(actual, recorded["decisions"]) is { } mismatch)
+                    throw new InvalidDataException($"{data.Name}/{c.S("case_id")}：{mismatch}");
+                decisions += actual.Count;
                 cases++; questions += recorded["questions"].Items().Count();
             }
             Console.WriteLine($"回放通过 {data.Name}：{cases} 案例，{decisions} 策略决策。");
             counts.Add(J.O(("workflow", data.Name), ("cases", cases), ("decisions", decisions), ("questions", questions)));
         }
         return J.O(("status", "ok"), ("code_revision", Data.CodeRevision), ("workflows", counts));
+    }
+
+    internal static async Task<(Dictionary<string, List<JsonObject>> Runs, JsonArray Cases)> Replay(List<WorkflowData> datasets,
+        Func<string, JsonNode, JsonObject, Dictionary<string, SystemOneAnswer>, Task<Dictionary<string, SystemOneAnswer>>> transport)
+    {
+        var runs = new Dictionary<string, List<JsonObject>>();
+        var cases = new JsonArray();
+        foreach (var data in datasets)
+        {
+            var jev = data.JevCases.ToDictionary(c => c.S("case_id"));
+            var predictions = runs[data.Name] = [];
+            foreach (var c in data.Cases)
+            {
+                var caseId = c.S("case_id");
+                var recorded = jev[caseId];
+                var expectedQuestions = recorded["questions"].Items();
+                var expectedDecisions = recorded["decisions"];
+                var session = new WorkflowSession(recorded, transport: transport);
+                JsonArray? actual = null;
+                string status;
+                string? error;
+                try
+                {
+                    actual = await Run(data, c, session);
+                    session.AssertComplete();
+                    error = DecisionMismatch(actual, expectedDecisions);
+                    status = error is null ? "matched" : "mismatch";
+                    predictions.Add(J.O(("case_id", caseId), ("decisions", actual)));
+                }
+                catch (Exception ex) when (ex is not OperationCanceledException)
+                {
+                    status = "incomplete";
+                    error = ex.Message;
+                }
+
+                var answered = session.Calls.Items().Where(call => call["answers"] is not null);
+                cases.Add(J.O(("workflow", data.Name), ("case_id", caseId), ("status", status), ("error", error),
+                    ("expected_questions", expectedQuestions.Count()), ("questions", answered.Sum(call => call["answers"]!.AsObject().Count)),
+                    ("expected_nodes", expectedQuestions.Select(row => row.S("node_id")).Distinct().Count()),
+                    ("nodes", answered.Select(call => call.S("node_id")).Distinct().Count()),
+                    ("expected_decisions", expectedDecisions), ("actual_decisions", actual)));
+            }
+        }
+        return (runs, cases);
+    }
+
+    private static string? DecisionMismatch(JsonArray actual, JsonNode? expected)
+    {
+        var expectedDecisions = expected.Items().ToDictionary(d => d.S("policy_id"));
+        if (actual.Count != expectedDecisions.Count || !actual.Items().Select(d => d.S("policy_id")).ToHashSet().SetEquals(expectedDecisions.Keys))
+            throw new InvalidDataException("回放策略 ID 不符。");
+
+        var mismatch = actual.Items().Where(decision =>
+        {
+            var reference = expectedDecisions[decision.S("policy_id")];
+            return decision.S("status") != reference.S("status") || !Scoring.Exact(decision["actions"], reference["actions"])
+                || Scoring.Compare("primary_action", decision, reference) == false;
+        }).Select(d => d.S("policy_id")).ToArray();
+        return mismatch.Length == 0 ? null : $"回放动作不符：{string.Join("、", mismatch)}";
     }
 }

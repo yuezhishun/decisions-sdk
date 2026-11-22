@@ -9,6 +9,7 @@
   </PropertyGroup>
   <ItemGroup>
     <ProjectReference Include="../../src/DeepSeek.Decisions/DeepSeek.Decisions.csproj" />
+    <InternalsVisibleTo Include="Codex.Decisions.Benchmarks" />
     <PackageReference Include="Parquet.Net" />
     <PackageReference Include="Microsoft.ML.Tokenizers" />
     <None Update="questions.json" CopyToOutputDirectory="PreserveNewest" />

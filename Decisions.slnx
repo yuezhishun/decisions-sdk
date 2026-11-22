@@ -8,6 +8,7 @@
     <Project Path="test/DeepSeek.Decisions.IntegrationTests/DeepSeek.Decisions.IntegrationTests.csproj" />
   </Folder>
   <Folder Name="/benchmark/">
+    <Project Path="benchmark/Codex.Decisions.Benchmarks/Codex.Decisions.Benchmarks.csproj" />
     <Project Path="benchmark/DeepSeek.Decisions.Benchmarks/DeepSeek.Decisions.Benchmarks.csproj" />
   </Folder>
   <Folder Name="/samples/">

@@ -19,6 +19,7 @@ public sealed partial class CodexAppServer : IAsyncDisposable
 
     private readonly string executable;
     private readonly string[] privateEnvironment;
+    private readonly string? requestedEffort;
     private readonly DirectoryInfo workingDirectory;
     private readonly SemaphoreSlim gate = new(1);
     private Process? process;
@@ -27,18 +28,20 @@ public sealed partial class CodexAppServer : IAsyncDisposable
     private string? effort;
     private bool disposed;
 
-    private CodexAppServer(string? executable, IReadOnlyList<string> privateEnvironment)
+    private CodexAppServer(string? executable, IReadOnlyList<string> privateEnvironment, string? requestedEffort)
     {
         executable = string.IsNullOrWhiteSpace(executable) ? FindExecutable() : executable;
         if (!Path.IsPathFullyQualified(executable) || !File.Exists(executable))
             throw new ArgumentException("请提供可用的 Codex 可执行文件绝对路径。", nameof(executable));
         this.executable = executable;
         this.privateEnvironment = [.. privateEnvironment];
+        this.requestedEffort = requestedEffort;
         workingDirectory = Directory.CreateTempSubdirectory("sag-codex-");
     }
 
     public string Model { get; private set; } = "";
     public string Plan { get; private set; } = "unknown";
+    internal string? ReasoningEffort => effort;
     internal bool SupportsImages { get; private set; }
 
     public static Task<CodexAppServer> StartAsync(string? executable, CancellationToken ct = default) =>
@@ -47,10 +50,14 @@ public sealed partial class CodexAppServer : IAsyncDisposable
     public static Task<CodexAppServer> StartAsync(string? executable, string? model, CancellationToken ct) =>
         StartAsync(executable, model, [], ct);
 
-    public static async Task<CodexAppServer> StartAsync(string? executable, string? model,
-        IReadOnlyList<string> privateEnvironment, CancellationToken ct)
+    public static Task<CodexAppServer> StartAsync(string? executable, string? model,
+        IReadOnlyList<string> privateEnvironment, CancellationToken ct) =>
+        StartAsync(executable, model, privateEnvironment, null, ct);
+
+    internal static async Task<CodexAppServer> StartAsync(string? executable, string? model,
+        IReadOnlyList<string> privateEnvironment, string? reasoningEffort, CancellationToken ct)
     {
-        var client = new CodexAppServer(executable, privateEnvironment) { Model = model?.Trim() ?? "" };
+        var client = new CodexAppServer(executable, privateEnvironment, reasoningEffort) { Model = model?.Trim() ?? "" };
         try
         {
             await client.StartProcessAsync(ct).ConfigureAwait(false);
@@ -122,10 +129,12 @@ public sealed partial class CodexAppServer : IAsyncDisposable
         CompleteJsonAsync(instructions, [new { type = "text", text = input }], [], schema, ct);
 
     internal async Task<(JsonElement Output, JsonElement? Usage)> CompleteJsonAsync(
-        string instructions, IReadOnlyList<object> input, IReadOnlyList<object> history, JsonElement schema, CancellationToken ct)
+        string instructions, IReadOnlyList<object> input, IReadOnlyList<object> history, JsonElement schema, CancellationToken ct,
+        bool strictModel = false, Action<string?, bool>? observeFinalText = null, TimeSpan? batchTimeout = null,
+        Action<JsonElement>? observeUsage = null)
     {
         using var deadline = CancellationTokenSource.CreateLinkedTokenSource(ct);
-        deadline.CancelAfter(TimeSpan.FromSeconds(80));
+        deadline.CancelAfter(batchTimeout ?? TimeSpan.FromSeconds(80));
         ct = deadline.Token;
         await gate.WaitAsync(ct).ConfigureAwait(false);
         string? threadId = null;
@@ -133,6 +142,18 @@ public sealed partial class CodexAppServer : IAsyncDisposable
         string? finalText = null;
         JsonElement? usage = null;
         bool started = false, completed = false, explicitFinal = false;
+
+        void ObserveTokenUsage(JsonElement message)
+        {
+            if (turnId is null || Text(message, "method") != "thread/tokenUsage/updated") return;
+            var data = Field(message, "params");
+            if (Text(data, "threadId") != threadId || Text(data, "turnId") != turnId) return;
+            var total = Field(Field(data, "tokenUsage"), "total");
+            if (total.ValueKind != JsonValueKind.Object) return;
+            usage = total;
+            observeUsage?.Invoke(total);
+        }
+
         try
         {
             await EnsureProcessAsync(ct).ConfigureAwait(false);
@@ -163,6 +184,21 @@ public sealed partial class CodexAppServer : IAsyncDisposable
                 if (Text(data, "threadId") != threadId) return;
                 string? eventTurn = method == "turn/completed" ? Text(Field(data, "turn"), "id") : Text(data, "turnId");
                 if (eventTurn is null || turnId is not null && eventTurn != turnId) return;
+                if (strictModel && turnId is not null)
+                {
+                    if (method == "model/rerouted" && Text(data, "toModel") != Model)
+                        throw new DecisionProtocolException(502, "model_rerouted", "Codex 将轮次切换到了其他模型。");
+                    var error = method switch
+                    {
+                        "turn/completed" => Field(Field(data, "turn"), "error"),
+                        "error" when Field(data, "willRetry").ValueKind != JsonValueKind.True => Field(data, "error"),
+                        _ => default,
+                    };
+                    var info = Field(error, "codexErrorInfo");
+                    if (info.ValueKind == JsonValueKind.String &&
+                        info.GetString() is "usageLimitExceeded" or "rateLimitExceeded")
+                        throw new DecisionProtocolException(429, "rate_limit", "Codex 报告额度或速率限制。");
+                }
                 if (method is "item/started" or "item/completed")
                 {
                     var item = Field(data, "item");
@@ -172,7 +208,8 @@ public sealed partial class CodexAppServer : IAsyncDisposable
                     if (method != "item/completed" || itemType != "agentMessage" ||
                         Text(item, "phase") is not (null or "final_answer")) return;
                 }
-                else if (method is not ("turn/completed" or "thread/tokenUsage/updated")) return;
+                else if (method is not ("turn/completed" or "thread/tokenUsage/updated") &&
+                    !(strictModel && method is "model/rerouted" or "error")) return;
 
                 if (turnId is null)
                 {
@@ -192,8 +229,7 @@ public sealed partial class CodexAppServer : IAsyncDisposable
                         }
                         break;
                     case "thread/tokenUsage/updated":
-                        var total = Field(Field(data, "tokenUsage"), "total");
-                        if (total.ValueKind == JsonValueKind.Object) usage = total;
+                        ObserveTokenUsage(message);
                         break;
                     case "turn/completed":
                         completed = true;
@@ -210,10 +246,27 @@ public sealed partial class CodexAppServer : IAsyncDisposable
                 sandboxPolicy = new { type = "readOnly", networkAccess = false }, approvalPolicy = "never"
             }, ct, Observe).ConfigureAwait(false), "turn");
             turnId = RequiredText(turn, "id");
-            foreach (var message in early) Observe(message);
+            var nextEvent = 0;
+            try
+            {
+                while (nextEvent < early.Count) Observe(early[nextEvent++]);
+            }
+            catch
+            {
+                // The remaining notifications have already been read from the stream.
+                for (; nextEvent < early.Count; nextEvent++) ObserveTokenUsage(early[nextEvent]);
+                throw;
+            }
             while (!completed) Observe(await ReadMessageAsync(ct).ConfigureAwait(false));
-            if (string.IsNullOrWhiteSpace(finalText)) throw new InvalidOperationException("Codex 未返回可用的结构化结果。");
-            var result = Parse(finalText);
+            JsonElement result;
+            var parsed = false;
+            try
+            {
+                if (string.IsNullOrWhiteSpace(finalText)) throw new InvalidOperationException("Codex 未返回可用的结构化结果。");
+                result = Parse(finalText);
+                parsed = true;
+            }
+            finally { observeFinalText?.Invoke(finalText, parsed); }
 
             using var cleanup = new CancellationTokenSource(TimeSpan.FromSeconds(4));
             await RequestAsync("thread/unsubscribe", new { threadId }, cleanup.Token, Observe).ConfigureAwait(false);
@@ -228,8 +281,8 @@ public sealed partial class CodexAppServer : IAsyncDisposable
                 try
                 {
                     if (!completed && turnId is not null)
-                        await RequestAsync("turn/interrupt", new { threadId, turnId }, cleanup.Token).ConfigureAwait(false);
-                    await RequestAsync("thread/unsubscribe", new { threadId }, cleanup.Token).ConfigureAwait(false);
+                        await RequestAsync("turn/interrupt", new { threadId, turnId }, cleanup.Token, ObserveTokenUsage).ConfigureAwait(false);
+                    await RequestAsync("thread/unsubscribe", new { threadId }, cleanup.Token, ObserveTokenUsage).ConfigureAwait(false);
                 }
                 catch (Exception ex) when (ex is InvalidOperationException or OperationCanceledException) { }
             }
@@ -291,7 +344,11 @@ public sealed partial class CodexAppServer : IAsyncDisposable
                 modalities.ValueKind == JsonValueKind.Array &&
                 modalities.EnumerateArray().Any(value => value.ValueKind == JsonValueKind.String && value.GetString() == "image");
             var efforts = Field(model, "supportedReasoningEfforts");
-            effort = efforts.ValueKind == JsonValueKind.Array && efforts.EnumerateArray().Any(item => Text(item, "reasoningEffort") == "low") ? "low" : null;
+            var preferredEffort = requestedEffort ?? "low";
+            effort = efforts.ValueKind == JsonValueKind.Array &&
+                efforts.EnumerateArray().Any(item => Text(item, "reasoningEffort") == preferredEffort) ? preferredEffort : null;
+            if (requestedEffort is not null && effort is null)
+                throw new InvalidOperationException($"Codex 模型 {Model} 不支持推理强度 {requestedEffort}。");
         }
         catch
         {

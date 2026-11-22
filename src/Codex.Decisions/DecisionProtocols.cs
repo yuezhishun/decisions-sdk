@@ -1,4 +1,5 @@
 using System.Text.Json;
+using System.Text.Json.Nodes;
 
 namespace Codex.Decisions;
 
@@ -31,12 +32,21 @@ public static class DecisionProtocols
         bool enableImages, bool enableLongContext, CancellationToken ct = default) =>
         EvaluateAsync(server, request, new DecisionProtocolInput(jev: true, enableImages, enableLongContext), ct);
 
+    internal static Task<JsonElement> CreateJevSystemOneWithUsageAsync(this CodexAppServer server, JsonElement request,
+        Action<JsonElement?> recordBatch, CancellationToken ct, bool strictModel = false, Action? beforeBatch = null,
+        Action<JsonObject>? observeBatch = null, TimeSpan? batchTimeout = null, string? additionalInstructions = null,
+        TimeSpan? requestTimeout = null) =>
+        EvaluateAsync(server, request, new DecisionProtocolInput(jev: true), ct, recordBatch, strictModel, beforeBatch, observeBatch,
+            batchTimeout, additionalInstructions, requestTimeout);
+
     private static async Task<JsonElement> EvaluateAsync(CodexAppServer server, JsonElement request,
-        DecisionProtocolInput parser, CancellationToken ct)
+        DecisionProtocolInput parser, CancellationToken ct, Action<JsonElement?>? recordBatch = null, bool strictModel = false,
+        Action? beforeBatch = null, Action<JsonObject>? observeBatch = null, TimeSpan? batchTimeout = null,
+        string? additionalInstructions = null, TimeSpan? requestTimeout = null)
     {
         ArgumentNullException.ThrowIfNull(server);
         using var deadline = CancellationTokenSource.CreateLinkedTokenSource(ct);
-        deadline.CancelAfter(TimeSpan.FromSeconds(80));
+        deadline.CancelAfter(requestTimeout ?? (strictModel ? TimeSpan.FromMinutes(10) : TimeSpan.FromSeconds(80)));
         var token = deadline.Token;
         DecisionJob parsed;
         try { parsed = await parser.ParseAsync(server, request, token).ConfigureAwait(false); }
@@ -46,6 +56,8 @@ public static class DecisionProtocols
         }
         var answers = new object[parsed.Questions.Count];
         var usage = new long[6];
+        var instructions = string.IsNullOrWhiteSpace(additionalInstructions)
+            ? Instructions : Instructions + "\n\n" + additionalInstructions;
 
         for (var offset = 0; offset < answers.Length;)
         {
@@ -71,21 +83,69 @@ public static class DecisionProtocols
             var input = new List<object> { new { type = "text", text } };
             input.AddRange(parsed.Images);
 
-            (JsonElement Output, JsonElement? Usage) result;
+            beforeBatch?.Invoke();
+            var diagnostic = observeBatch is null ? null : new JsonObject
+            {
+                ["offset"] = offset,
+                ["count"] = count,
+                ["status"] = "error"
+            };
+            bool? finalOutputParsed = null;
+            Action<string?, bool>? observeFinalText = diagnostic is null && recordBatch is null ? null : (text, parsedJsonObject) =>
+            {
+                finalOutputParsed = parsedJsonObject;
+                if (diagnostic is not null)
+                {
+                    diagnostic["raw_text"] = text;
+                    diagnostic["parsed_json_object"] = parsedJsonObject;
+                }
+            };
             try
             {
-                result = await server.CompleteJsonAsync(Instructions, input, parsed.History, Schema, token).ConfigureAwait(false);
+                JsonElement? batchUsage = null;
+                (JsonElement Output, JsonElement? Usage) result;
+                try
+                {
+                    result = await server.CompleteJsonAsync(instructions, input, parsed.History, Schema, token, strictModel,
+                        observeFinalText: observeFinalText, batchTimeout: batchTimeout,
+                        observeUsage: recordBatch is null ? null : value => batchUsage = value).ConfigureAwait(false);
+                }
+                catch (OperationCanceledException) when (!ct.IsCancellationRequested)
+                {
+                    // Parsing has finished, so the remaining timeout belongs to unsubscribe.
+                    if (recordBatch is not null && finalOutputParsed == true)
+                        throw new DecisionProtocolException(502, "backend_transport_failed", "Codex 取消订阅超时。");
+                    throw new DecisionProtocolException(504, "backend_timeout", "Codex 决策超时。");
+                }
+                catch (Exception error) when (error is InvalidOperationException or JsonException or IOException)
+                {
+                    var code = recordBatch is not null && finalOutputParsed != false ? "backend_transport_failed" : "invalid_backend_response";
+                    throw new DecisionProtocolException(502, code, "Codex 未返回有效决策。");
+                }
+                finally { recordBatch?.Invoke(batchUsage); }
+
+                if (diagnostic is not null)
+                    diagnostic["raw_output"] = result.Output.ValueKind == JsonValueKind.Undefined ? null : JsonNode.Parse(result.Output.GetRawText());
+                ReadAnswers(result.Output, batch, offset, answers, parser.Jev, diagnostic);
+                ReadUsage(result.Usage, usage, parser.Jev, diagnostic);
+                if (diagnostic is not null) diagnostic["status"] = "ok";
             }
-            catch (OperationCanceledException) when (!ct.IsCancellationRequested)
+            catch (DecisionProtocolException error) when (diagnostic is not null && !diagnostic.ContainsKey("failure_code"))
             {
-                throw new DecisionProtocolException(504, "backend_timeout", "Codex 决策超时。");
+                diagnostic["failure_code"] = error.Code == "invalid_backend_response"
+                    ? string.IsNullOrWhiteSpace(diagnostic["raw_text"]?.GetValue<string>()) ? "backend_no_response" : "response_not_json_object"
+                    : error.Code;
+                throw;
             }
-            catch (Exception error) when (error is InvalidOperationException or JsonException or IOException)
+            catch (OperationCanceledException) when (diagnostic is not null)
             {
-                throw new DecisionProtocolException(502, "invalid_backend_response", "Codex 未返回有效决策。");
+                diagnostic["failure_code"] = "cancelled";
+                throw;
             }
-            ReadAnswers(result.Output, batch, offset, answers, parser.Jev);
-            ReadUsage(result.Usage, usage, parser.Jev);
+            finally
+            {
+                if (diagnostic is not null) observeBatch!(diagnostic);
+            }
             offset += count;
         }
 
@@ -115,47 +175,74 @@ public static class DecisionProtocols
         });
     }
 
-    private static void ReadAnswers(JsonElement output, DecisionQuestion[] batch, int offset, object[] answers, bool jev)
+    private static void ReadAnswers(JsonElement output, DecisionQuestion[] batch, int offset, object[] answers, bool jev, JsonObject? diagnostic)
     {
-        if (!HasFields(output, "answers") || !output.TryGetProperty("answers", out var items) ||
-            items.ValueKind != JsonValueKind.Array || items.GetArrayLength() != batch.Length)
-            throw BadResult();
+        if (!HasFields(output, "answers")) throw BadResult(diagnostic, "root_fields");
+        if (!output.TryGetProperty("answers", out var items) || items.ValueKind != JsonValueKind.Array)
+            throw BadResult(diagnostic, "answers_type", details: new { actual_kind = items.ValueKind.ToString() });
+        if (items.GetArrayLength() != batch.Length)
+            throw BadResult(diagnostic, "answer_count", details: new { expected = batch.Length, actual = items.GetArrayLength() });
+        var itemPosition = 0;
         foreach (var item in items.EnumerateArray())
         {
-            if (!HasFields(item, "index", "refusal", "probabilities", "box", "confidence") ||
-                !item.TryGetProperty("index", out var id) || id.ValueKind != JsonValueKind.Number ||
-                !id.TryGetInt32(out var index) || index < offset || index >= offset + batch.Length || answers[index] is not null ||
-                !item.TryGetProperty("refusal", out var refusal) || refusal.ValueKind is not (JsonValueKind.True or JsonValueKind.False) ||
-                !item.TryGetProperty("probabilities", out var probabilities) || probabilities.ValueKind != JsonValueKind.Array ||
-                !item.TryGetProperty("box", out var box) || !item.TryGetProperty("confidence", out var confidence))
-                throw BadResult();
+            var position = itemPosition++;
+            if (!HasFields(item, "index", "refusal", "probabilities", "box", "confidence"))
+            {
+                int? knownIndex = item.ValueKind == JsonValueKind.Object && item.TryGetProperty("index", out var candidate) &&
+                    candidate.ValueKind == JsonValueKind.Number && candidate.TryGetInt32(out var number) && number >= offset && number < offset + batch.Length
+                    ? number : null;
+                throw BadResult(diagnostic, "item_fields", knownIndex, position);
+            }
+            if (!item.TryGetProperty("index", out var id) || id.ValueKind != JsonValueKind.Number || !id.TryGetInt32(out var index))
+                throw BadResult(diagnostic, "index_type", position: position);
+            if (index < offset || index >= offset + batch.Length)
+                throw BadResult(diagnostic, "index_range", position: position, details: new { actual_index = index });
+            if (answers[index] is not null) throw BadResult(diagnostic, "index_duplicate", index, position);
+            if (!item.TryGetProperty("refusal", out var refusal) || refusal.ValueKind is not (JsonValueKind.True or JsonValueKind.False))
+                throw BadResult(diagnostic, "refusal_type", index, position);
+            if (!item.TryGetProperty("probabilities", out var probabilities) || probabilities.ValueKind != JsonValueKind.Array)
+                throw BadResult(diagnostic, "probabilities_type", index, position);
+            if (!item.TryGetProperty("box", out var box) || !item.TryGetProperty("confidence", out var confidence))
+                throw BadResult(diagnostic, "item_fields", index, position);
             var question = batch[index - offset];
             if (refusal.GetBoolean())
             {
                 if (probabilities.GetArrayLength() != 0 || box.ValueKind != JsonValueKind.Null || confidence.ValueKind != JsonValueKind.Null)
-                    throw BadResult();
-                if (jev) throw new DecisionProtocolException(502, "model_refusal", "Codex 拒绝回答一条 Jev 问题。");
+                    throw BadResult(diagnostic, "refusal_payload", index, position);
+                if (jev)
+                {
+                    RecordFailure(diagnostic, "model_refusal", index, position);
+                    throw new DecisionProtocolException(502, "model_refusal", "Codex 拒绝回答一条 Jev 问题。");
+                }
                 answers[index] = new { type = "refusal", name = question.Name };
             }
             else if (question.Type == "box")
             {
-                if (probabilities.GetArrayLength() != 0 || !HasFields(box, "left", "top", "right", "bottom")) throw BadResult();
-                double Edge(string key) => box.TryGetProperty(key, out var value) ? Unit(value) : throw BadResult();
+                if (probabilities.GetArrayLength() != 0 || !HasFields(box, "left", "top", "right", "bottom"))
+                    throw BadResult(diagnostic, "box_payload", index, position);
+                double Edge(string key) => box.TryGetProperty(key, out var value)
+                    ? Unit(value, diagnostic, "box_range", index, position, field: key)
+                    : throw BadResult(diagnostic, "box_payload", index, position);
                 var left = Edge("left");
                 var top = Edge("top");
                 var right = Edge("right");
                 var bottom = Edge("bottom");
-                if (left >= right || top >= bottom) throw BadResult();
+                if (left >= right || top >= bottom) throw BadResult(diagnostic, "box_order", index, position);
                 answers[index] = new { type = "box", box = new { left, top, right, bottom },
-                    confidence = confidence.ValueKind == JsonValueKind.Null ? (double?)null : Unit(confidence) };
+                    confidence = confidence.ValueKind == JsonValueKind.Null ? (double?)null : Unit(confidence, diagnostic, "box_range", index, position, field: "confidence") };
             }
             else
             {
-                if (box.ValueKind != JsonValueKind.Null || confidence.ValueKind != JsonValueKind.Null ||
-                    probabilities.GetArrayLength() != question.Values.Length) throw BadResult();
-                var distribution = probabilities.EnumerateArray().Select(Unit).ToArray();
+                if (box.ValueKind != JsonValueKind.Null || confidence.ValueKind != JsonValueKind.Null)
+                    throw BadResult(diagnostic, "unexpected_box_or_confidence", index, position);
+                if (probabilities.GetArrayLength() != question.Values.Length)
+                    throw BadResult(diagnostic, "probability_count", index, position,
+                        new { expected = question.Values.Length, actual = probabilities.GetArrayLength() });
+                var distribution = probabilities.EnumerateArray().Select((value, option) =>
+                    Unit(value, diagnostic, "probability_range", index, position, option)).ToArray();
                 var sum = distribution.Sum();
-                if (Math.Abs(sum - 1) > 0.005) throw BadResult();
+                if (Math.Abs(sum - 1) > 0.005)
+                    throw BadResult(diagnostic, "probability_sum", index, position, new { sum, expected = 1, tolerance = 0.005 });
                 for (var i = 0; i < distribution.Length; i++) distribution[i] /= sum;
                 answers[index] = FormatAnswer(question, distribution, jev);
             }
@@ -186,29 +273,49 @@ public static class DecisionProtocols
             probabilities = question.Values.Select((value, index) => new { value, label = question.Labels![index], probability = p[index] }).ToArray() };
     }
 
-    private static void ReadUsage(JsonElement? raw, long[] totals, bool jev)
+    private static void ReadUsage(JsonElement? raw, long[] totals, bool jev, JsonObject? diagnostic)
     {
-        if (raw is not { ValueKind: JsonValueKind.Object } usage) throw BadResult();
+        if (raw is not { ValueKind: JsonValueKind.Object } usage)
+            throw BadResult(diagnostic, raw is null or { ValueKind: JsonValueKind.Null } ? "usage_missing" : "usage_invalid");
         string[] keys = ["inputTokens", "outputTokens", "totalTokens", "cachedInputTokens", "cacheWriteInputTokens", "reasoningOutputTokens"];
         for (var i = 0; i < (jev ? 2 : keys.Length); i++)
         {
-            if (!usage.TryGetProperty(keys[i], out var count) && i == 4) continue; // Older Codex releases omit this zero-default field.
-            if (count.ValueKind != JsonValueKind.Number || !count.TryGetInt64(out var value) || value < 0 ||
-                totals[i] > long.MaxValue - value) throw BadResult();
+            if (!usage.TryGetProperty(keys[i], out var count))
+            {
+                if (i == 4) continue; // Older Codex releases omit this zero-default field.
+                throw BadResult(diagnostic, "usage_field_missing", details: new { field = keys[i] });
+            }
+            if (count.ValueKind != JsonValueKind.Number || !count.TryGetInt64(out var value) || value < 0)
+                throw BadResult(diagnostic, "usage_field_invalid", details: new { field = keys[i] });
+            if (totals[i] > long.MaxValue - value)
+                throw BadResult(diagnostic, "usage_overflow", details: new { field = keys[i] });
             totals[i] += value;
         }
     }
 
-    private static double Unit(JsonElement value) =>
+    private static double Unit(JsonElement value, JsonObject? diagnostic, string code, int index, int position, int? option = null, string? field = null) =>
         value.ValueKind == JsonValueKind.Number && value.TryGetDouble(out var number) &&
-        double.IsFinite(number) && number is >= 0 and <= 1 ? number : throw BadResult();
+        double.IsFinite(number) && number is >= 0 and <= 1 ? number :
+        throw BadResult(diagnostic, code, index, position, new { option_index = option, field, actual_kind = value.ValueKind.ToString() });
 
     private static bool HasFields(JsonElement value, params string[] fields) =>
         value.ValueKind == JsonValueKind.Object && value.EnumerateObject().Select(property => property.Name)
             .Order(StringComparer.Ordinal).SequenceEqual(fields.Order(StringComparer.Ordinal), StringComparer.Ordinal);
 
-    private static DecisionProtocolException BadResult() =>
-        new(502, "invalid_backend_response", "Codex 决策的答案、概率、边界框或用量无效。");
+    private static DecisionProtocolException BadResult(JsonObject? diagnostic, string code, int? index = null, int? position = null, object? details = null)
+    {
+        RecordFailure(diagnostic, code, index, position, details);
+        return new(502, "invalid_backend_response", "Codex 决策的答案、概率、边界框或用量无效。");
+    }
+
+    private static void RecordFailure(JsonObject? diagnostic, string code, int? index, int? position, object? details = null)
+    {
+        if (diagnostic is null) return;
+        diagnostic["failure_code"] = code;
+        if (index.HasValue) diagnostic["question_index"] = index.Value;
+        if (position.HasValue) diagnostic["item_position"] = position.Value;
+        if (details is not null) diagnostic["details"] = JsonSerializer.SerializeToNode(details);
+    }
 }
 
 internal sealed record DecisionQuestion(string Key, string? Name, string Type, object? Instructions,

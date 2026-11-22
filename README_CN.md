@@ -7,13 +7,13 @@
 | [Decisions.Codex](src/Codex.Decisions/README.md) | .NET 11 | 本机 Codex App Server |
 | [DeepSeek.Decisions](src/DeepSeek.Decisions/README.md) | .NET Standard 2.0 | 通过 [DeepSeek.Core](https://github.com/yuezhishun/deepseek-sdk) 调用 DeepSeek Chat Completions |
 
-[English](README.md) · [双协议示例](samples/DecisionsDemo/README.md) · [WorkflowEvals 评测](benchmark/DeepSeek.Decisions.Benchmarks/README.md)
+[English](README.md) · [双协议示例](samples/DecisionsDemo/README.md) · [DeepSeek WorkflowEvals 评测](benchmark/DeepSeek.Decisions.Benchmarks/README.md) · [Codex WorkflowEvals 回放](benchmark/Codex.Decisions.Benchmarks/README.md)
 
 ## 安装
 
 ```shell
-dotnet add package Decisions.Codex --version 1.0.0-rc.1
-dotnet add package DeepSeek.Decisions --version 1.2.0
+dotnet add package Decisions.Codex --version 1.0.0
+dotnet add package DeepSeek.Decisions --version 1.2.1
 ```
 
 以 NuGet 上的 [Decisions.Codex](https://www.nuget.org/packages/Decisions.Codex) 和 [DeepSeek.Decisions](https://www.nuget.org/packages/DeepSeek.Decisions) 为准。发布前可以从本仓库直接构建。
@@ -43,9 +43,9 @@ dotnet test test/DeepSeek.Decisions.IntegrationTests -c Release
 在 NuGet 配置 `yuezhishun/decisions-sdk` 的 `publish-nuget.yml` 为 Trusted Publisher，并授权目标包。首次发布 `Decisions.Codex` 需授权新包。手动验证通过后创建并推送对应的注释标签。NuGet 确认可下载后，再创建带中英文说明的 GitHub Release，标题用版本号。
 
 ```shell
-git tag -a Decisions.Codex/v1.0.0-rc.1 -m "Decisions.Codex 1.0.0-rc.1"
-git push origin Decisions.Codex/v1.0.0-rc.1
+git tag -a Decisions.Codex/v1.0.0 -m "Decisions.Codex 1.0.0"
+git push origin Decisions.Codex/v1.0.0
 
-git tag -a DeepSeek.Decisions/v1.2.0 -m "DeepSeek.Decisions 1.2.0"
-git push origin DeepSeek.Decisions/v1.2.0
+git tag -a DeepSeek.Decisions/v1.2.1 -m "DeepSeek.Decisions 1.2.1"
+git push origin DeepSeek.Decisions/v1.2.1
 ```

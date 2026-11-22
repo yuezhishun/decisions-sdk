@@ -4,7 +4,7 @@ using Codex.Decisions;
 
 Console.InputEncoding = Encoding.UTF8;
 Console.OutputEncoding = new UTF8Encoding(false);
-if (args is ["--probe-cancel" or "--probe-path"])
+if (args is ["--probe-cancel" or "--probe-path" or "--probe-cleanup-timeout"])
 {
     using var setup = new CancellationTokenSource(TimeSpan.FromSeconds(15));
     var discover = args[0] == "--probe-path";
@@ -13,6 +13,25 @@ if (args is ["--probe-cancel" or "--probe-path"])
     {
         Console.WriteLine($"path-model={client.Model}");
         return;
+    }
+    if (args[0] == "--probe-cleanup-timeout")
+    {
+        var request = JsonSerializer.SerializeToElement(new
+        {
+            model = client.Model,
+            state = "fixture",
+            questions = new { answer = new { type = "noul", instructions = "Is this the fixture?" } }
+        });
+        try
+        {
+            await client.CreateJevSystemOneAsync(request, enableImages: false, enableLongContext: false, ct: setup.Token);
+        }
+        catch (DecisionProtocolException error) when (error is { Code: "backend_timeout", StatusCode: 504 })
+        {
+            Console.WriteLine("Public Jev retains backend_timeout/504.");
+            return;
+        }
+        throw new InvalidOperationException("The public SDK must preserve its cleanup timeout response.");
     }
     using var schema = JsonDocument.Parse("""{"type":"object","properties":{"sourceIds":{"type":"array","items":{"type":"integer"}}},"required":["sourceIds"],"additionalProperties":false}""");
     var concurrent = new[] { 11, 12 }.Select(marker => client.CompleteJsonAsync("Fixture correlation",
@@ -49,6 +68,7 @@ if (args.FirstOrDefault() == "app-server")
 var directory = AppContext.BaseDirectory;
 var modeFile = Path.Combine(directory, "mode.txt");
 var events = Path.Combine(directory, "events.jsonl");
+var replayFile = Path.Combine(directory, "workflow-replay.json");
 var sequence = 0;
 var turnCount = 0;
 var ready = false;
@@ -115,9 +135,10 @@ while (Console.ReadLine() is { } line)
         case "model/list":
             Reply(new
             {
-                data = new[] { "fixture-model", "gpt-6-luna" }.Select(model => new { model, id = model,
+                data = new[] { "fixture-model", "gpt-6-luna", "gpt-6.2-sol" }.Select(model => new { model, id = model,
                     isDefault = model == "fixture-model", hidden = false, inputModalities = new[] { "text", "image" },
-                    supportedReasoningEfforts = new[] { new { reasoningEffort = "low" } } }),
+                    supportedReasoningEfforts = (model == "gpt-6.2-sol" ? new[] { "low", "medium" } : ["low"])
+                        .Select(reasoningEffort => new { reasoningEffort }) }),
                 nextCursor = (string?)null
             });
             break;
@@ -135,7 +156,7 @@ while (Console.ReadLine() is { } line)
             if (parameters.GetProperty("threadId").GetString() != activeThread)
                 throw new InvalidOperationException("History was sent to the wrong thread.");
             var history = parameters.GetProperty("items");
-            File.AppendAllText(events, JsonSerializer.Serialize(new { phase = "history", items = history }) + "\n");
+            if (mode != "workflow-evals") File.AppendAllText(events, JsonSerializer.Serialize(new { phase = "history", items = history }) + "\n");
             Reply(new { });
             break;
         case "turn/start":
@@ -153,12 +174,23 @@ while (Console.ReadLine() is { } line)
                     throw new InvalidOperationException("Unexpected content outside the corpus.");
                 var schema = parameters.GetProperty("outputSchema").GetProperty("properties");
                 var protocol = schema.TryGetProperty("answers", out _);
+                if (mode == "workflow-evals" && !protocol)
+                    throw new InvalidOperationException("WorkflowEvals requires the Decisions answer schema.");
                 if (!protocol && !schema.TryGetProperty(scoring ? "scores" : "sourceIds", out _))
                     throw new InvalidOperationException("Unexpected response schema.");
-                File.AppendAllText(events, JsonSerializer.Serialize(new { mode, phase = protocol ? "protocol" : scoring ? "score" : "answer",
-                    model = activeModel, images = parameters.GetProperty("input").EnumerateArray()
-                        .Count(item => item.GetProperty("type").GetString() == "image") }) + "\n");
+                if (mode != "workflow-evals")
+                    File.AppendAllText(events, JsonSerializer.Serialize(new { mode, phase = protocol ? "protocol" : scoring ? "score" : "answer",
+                        model = activeModel, images = parameters.GetProperty("input").EnumerateArray()
+                            .Count(item => item.GetProperty("type").GetString() == "image") }) + "\n");
+                if (mode == "early-model-rerouted")
+                {
+                    Notice("model/rerouted", new { threadId, turnId, toModel = "fixture-fallback" });
+                    NoticeUsage(threadId, turnId, 30, 11);
+                    NoticeUsage(threadId, "unrelated-turn", 999, 999);
+                    NoticeUsage("unrelated-thread", turnId, 999, 999);
+                }
                 Reply(new { turn = new { id = turnId, status = "inProgress", items = Array.Empty<object>() } });
+                if (mode == "early-model-rerouted") break;
                 var markerResponse = payload.TryGetProperty("marker", out var marker);
                 if (mode == "timeout" && !markerResponse) break;
                 if (mode == "web-serial" && !scoring && payload.GetProperty("question").GetString()!.EndsWith(" [本轮并发编号 sagwebaaaa]", StringComparison.Ordinal))
@@ -173,23 +205,44 @@ while (Console.ReadLine() is { } line)
                     Notice("item/started", new { threadId, turnId, item = new { id = "unexpected-tool", type = "commandExecution" } });
                     break;
                 }
-                var output = markerResponse ? new { sourceIds = new[] { marker.GetInt32() } }
+                var output = mode == "workflow-evals" ? WorkflowAnswers(payload, questions, replayFile)
+                    : markerResponse ? new { sourceIds = new[] { marker.GetInt32() } }
                     : protocol ? ProtocolAnswers(questions)
                     : scoring ? Score(payload, questions, mode) : AnswerQuestion(payload, mode);
                 Notice("item/completed", new { threadId = "unrelated-thread", turnId, item = new { id = "unrelated", type = "agentMessage", phase = "final_answer", text = "{}" } });
                 Notice("thread/tokenUsage/updated", new { threadId, turnId = "unrelated-turn", tokenUsage = new { total = new { totalTokens = 999999 } } });
-                Notice("item/completed", new { threadId, turnId, item = new { id = "final", type = "agentMessage", phase = "final_answer", text = JsonSerializer.Serialize(output) } });
-                Notice("thread/tokenUsage/updated", new { threadId, turnId, tokenUsage = new { total = new { totalTokens = scoring ? 41 : 42,
-                    inputTokens = 30, cachedInputTokens = 0, cacheWriteInputTokens = 0,
-                    outputTokens = scoring ? 11 : 12, reasoningOutputTokens = 0 } } });
+                var inputTokens = mode == "workflow-evals" ? 1 : 30;
+                var outputTokens = mode == "workflow-evals" ? 1 : scoring ? 11 : 12;
+                if (mode is not ("invalid-json-no-usage" or "invalid-json-with-late-usage"))
+                    NoticeUsage(threadId, turnId, inputTokens, outputTokens);
+                if (mode == "model-rerouted")
+                    Notice("model/rerouted", new { threadId, turnId, toModel = "fixture-fallback" });
+                if (mode == "rate-limit-with-usage")
+                {
+                    Notice("error", new { threadId, turnId, willRetry = false, error = new { codexErrorInfo = "rateLimitExceeded" } });
+                    break;
+                }
+                var finalText = mode is "invalid-json-with-usage" or "invalid-json-no-usage" or "invalid-json-with-late-usage"
+                    ? "invalid JSON" : JsonSerializer.Serialize(output);
+                Notice("item/completed", new { threadId, turnId, item = new { id = "final", type = "agentMessage", phase = "final_answer", text = finalText } });
                 Notice("turn/completed", new { threadId, turn = new { id = turnId, status = "completed", items = Array.Empty<object>() } });
             }
             break;
         case "thread/unsubscribe":
-            Reply(new { status = "unsubscribed" });
+            if (mode == "cleanup-timeout-with-usage") break;
+            if (mode == "invalid-json-with-late-usage")
+            {
+                NoticeUsage(activeThread, $"turn-{turnCount}", 30, 11);
+                NoticeUsage(activeThread, "unrelated-turn", 999, 999);
+                NoticeUsage("unrelated-thread", $"turn-{turnCount}", 999, 999);
+            }
+            if (mode == "cleanup-failure-with-usage")
+                Send(new { id, error = new { code = -32603, message = "Fixture unsubscribe failed" } });
+            else
+                Reply(new { status = "unsubscribed" });
             break;
         case "turn/interrupt":
-            File.AppendAllText(events, "{\"phase\":\"interrupt\"}\n");
+            if (mode != "workflow-evals") File.AppendAllText(events, "{\"phase\":\"interrupt\"}\n");
             Reply(new { });
             break;
         default:
@@ -200,6 +253,28 @@ while (Console.ReadLine() is { } line)
 
 static void Send(object message) => Console.WriteLine(JsonSerializer.Serialize(message));
 static void Notice(string method, object parameters) => Send(new { method, @params = parameters });
+
+static void NoticeUsage(string? threadId, string turnId, int inputTokens, int outputTokens) =>
+    Notice("thread/tokenUsage/updated", new { threadId, turnId, tokenUsage = new { total = new { totalTokens = inputTokens + outputTokens,
+        inputTokens, cachedInputTokens = 0, cacheWriteInputTokens = 0, outputTokens, reasoningOutputTokens = 0 } } });
+
+static object WorkflowAnswers(JsonElement payload, JsonElement questions, string replayFile)
+{
+    using var document = JsonDocument.Parse(File.ReadAllText(replayFile));
+    var replay = document.RootElement;
+    if (!JsonElement.DeepEquals(payload.GetProperty("state"), replay.GetProperty("state")))
+        throw new InvalidOperationException("WorkflowEvals 状态与录制输入不一致。");
+    var byIndex = replay.GetProperty("questions").EnumerateArray().ToDictionary(question => question.GetProperty("index").GetInt32());
+    var answers = questions.EnumerateArray().Select(question =>
+    {
+        var index = question.GetProperty("index").GetInt32();
+        if (!byIndex.TryGetValue(index, out var expected) || new[] { "type", "instructions", "choices" }
+            .Any(field => !JsonElement.DeepEquals(question.GetProperty(field), expected.GetProperty(field))))
+            throw new InvalidOperationException($"WorkflowEvals 题目 {index} 与录制输入不一致。");
+        return new { index, refusal = false, probabilities = expected.GetProperty("probabilities").Clone(), box = (object?)null, confidence = (double?)null };
+    }).ToArray();
+    return new { answers };
+}
 
 static object ProtocolAnswers(JsonElement questions)
 {

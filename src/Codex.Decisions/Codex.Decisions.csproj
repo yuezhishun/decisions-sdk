@@ -4,7 +4,7 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
     <PackageId>Decisions.Codex</PackageId>
-    <Version>1.0.0-rc.1</Version>
+    <Version>1.0.0</Version>
     <Authors>Yue Zhishun</Authors>
     <Description>通过本机 Codex App Server 提供 OpenAI Decisions、Jev System One 和结构化回答。</Description>
     <PackageProjectUrl>https://github.com/yuezhishun/decisions-sdk</PackageProjectUrl>
@@ -16,6 +16,7 @@
     <SymbolPackageFormat>snupkg</SymbolPackageFormat>
   </PropertyGroup>
   <ItemGroup>
+    <InternalsVisibleTo Include="Codex.Decisions.Benchmarks" />
     <None Include="README.md" Pack="true" PackagePath="/" />
   </ItemGroup>
 </Project>
