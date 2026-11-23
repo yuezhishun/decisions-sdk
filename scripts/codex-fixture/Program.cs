@@ -4,7 +4,7 @@ using Codex.Decisions;
 
 Console.InputEncoding = Encoding.UTF8;
 Console.OutputEncoding = new UTF8Encoding(false);
-if (args is ["--probe-cancel" or "--probe-path" or "--probe-cleanup-timeout"])
+if (args is ["--probe-cancel" or "--probe-path" or "--probe-cleanup-timeout" or "--probe-stream"])
 {
     using var setup = new CancellationTokenSource(TimeSpan.FromSeconds(15));
     var discover = args[0] == "--probe-path";
@@ -34,6 +34,32 @@ if (args is ["--probe-cancel" or "--probe-path" or "--probe-cleanup-timeout"])
         throw new InvalidOperationException("The public SDK must preserve its cleanup timeout response.");
     }
     using var schema = JsonDocument.Parse("""{"type":"object","properties":{"sourceIds":{"type":"array","items":{"type":"integer"}}},"required":["sourceIds"],"additionalProperties":false}""");
+    if (args[0] == "--probe-stream")
+    {
+        var chunks = new List<string>();
+        var result = await client.CompleteJsonAsync("Fixture stream", """{"marker":13,"stream":"final_answer"}""",
+            schema.RootElement, chunks.Add, setup.Token);
+        if (!chunks.SequenceEqual(["{", "\"sourceIds\":[", "13]}"]) ||
+            result.Output.GetProperty("sourceIds")[0].GetInt32() != 13)
+            throw new InvalidOperationException("Only this turn's final answer may supply JSON chunks.");
+
+        chunks.Clear();
+        var legacy = await client.CompleteJsonAsync("Fixture legacy stream", """{"marker":13,"stream":"legacy"}""",
+            schema.RootElement, chunks.Add, setup.Token);
+        if (chunks.Count != 0 || legacy.Output.GetProperty("sourceIds")[0].GetInt32() != 13)
+            throw new InvalidOperationException("A missing message phase must retain the result without previewing unknown text.");
+
+        using var streamCancel = CancellationTokenSource.CreateLinkedTokenSource(setup.Token);
+        try
+        {
+            await client.CompleteJsonAsync("Fixture stream cancellation", """{"marker":13,"stream":"cancel"}""",
+                schema.RootElement, chunk => { chunks.Add(chunk); streamCancel.Cancel(); }, streamCancel.Token);
+            throw new InvalidOperationException("A cancelled stream returned an answer.");
+        }
+        catch (OperationCanceledException) when (!setup.IsCancellationRequested && chunks.SequenceEqual(["{"])) { }
+        Console.WriteLine("Codex structured streaming filtered unrelated text and interrupted a cancelled turn.");
+        return;
+    }
     var concurrent = new[] { 11, 12 }.Select(marker => client.CompleteJsonAsync("Fixture correlation",
         JsonSerializer.Serialize(new { marker }), schema.RootElement, setup.Token));
     var results = await Task.WhenAll(concurrent);
@@ -190,8 +216,22 @@ while (Console.ReadLine() is { } line)
                     NoticeUsage(threadId, "unrelated-turn", 999, 999);
                     NoticeUsage("unrelated-thread", turnId, 999, 999);
                 }
+                var stream = payload.TryGetProperty("stream", out var streamMode) ? streamMode.GetString() : null;
+                var streamPhase = stream == "legacy" ? null : "final_answer";
+                if (stream is not null)
+                {
+                    Notice("item/started", new { threadId, turnId, item = new { id = "commentary", type = "agentMessage", phase = "commentary", text = "commentary" } });
+                    Notice("item/agentMessage/delta", new { threadId, turnId, itemId = "commentary", delta = "commentary" });
+                    Notice("item/started", new { threadId, turnId, item = new { id = "final", type = "agentMessage", phase = streamPhase, text = "{" } });
+                    Notice("item/agentMessage/delta", new { threadId, turnId, itemId = "unknown", delta = "wrong item" });
+                    Notice("item/agentMessage/delta", new { threadId, turnId = "unrelated-turn", itemId = "final", delta = "wrong turn" });
+                    Notice("item/agentMessage/delta", new { threadId = "unrelated-thread", turnId, itemId = "final", delta = "wrong thread" });
+                    Notice("item/agentMessage/delta", new { threadId, turnId, itemId = "final", delta = "\"sourceIds\":[" });
+                }
                 Reply(new { turn = new { id = turnId, status = "inProgress", items = Array.Empty<object>() } });
-                if (mode == "early-model-rerouted") break;
+                if (mode == "early-model-rerouted" || stream == "cancel") break;
+                if (stream is not null)
+                    Notice("item/agentMessage/delta", new { threadId, turnId, itemId = "final", delta = "13]}" });
                 var markerResponse = payload.TryGetProperty("marker", out var marker);
                 if (mode == "timeout" && !markerResponse) break;
                 if (mode == "web-serial" && !scoring && payload.GetProperty("question").GetString()!.EndsWith(" [本轮并发编号 sagwebaaaa]", StringComparison.Ordinal))
@@ -225,8 +265,10 @@ while (Console.ReadLine() is { } line)
                 }
                 var finalText = mode is "invalid-json-with-usage" or "invalid-json-no-usage" or "invalid-json-with-late-usage"
                     ? "invalid JSON" : JsonSerializer.Serialize(output);
-                Notice("item/completed", new { threadId, turnId, item = new { id = "final", type = "agentMessage", phase = "final_answer", text = finalText } });
+                Notice("item/completed", new { threadId, turnId, item = new { id = "final", type = "agentMessage", phase = streamPhase, text = finalText } });
                 Notice("turn/completed", new { threadId, turn = new { id = turnId, status = "completed", items = Array.Empty<object>() } });
+                if (stream is not null)
+                    Notice("item/started", new { threadId, turnId, item = new { id = "late", type = "agentMessage", phase = "final_answer", text = "late final text" } });
             }
             break;
         case "thread/unsubscribe":

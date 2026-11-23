@@ -128,10 +128,17 @@ public sealed partial class CodexAppServer : IAsyncDisposable
         string instructions, string input, JsonElement schema, CancellationToken ct = default) =>
         CompleteJsonAsync(instructions, [new { type = "text", text = input }], [], schema, ct);
 
+    public Task<(JsonElement Output, JsonElement? Usage)> CompleteJsonAsync(
+        string instructions, string input, JsonElement schema, Action<string> onDelta, CancellationToken ct)
+    {
+        ArgumentNullException.ThrowIfNull(onDelta);
+        return CompleteJsonAsync(instructions, [new { type = "text", text = input }], [], schema, ct, onDelta: onDelta);
+    }
+
     internal async Task<(JsonElement Output, JsonElement? Usage)> CompleteJsonAsync(
         string instructions, IReadOnlyList<object> input, IReadOnlyList<object> history, JsonElement schema, CancellationToken ct,
         bool strictModel = false, Action<string?, bool>? observeFinalText = null, TimeSpan? batchTimeout = null,
-        Action<JsonElement>? observeUsage = null)
+        Action<JsonElement>? observeUsage = null, Action<string>? onDelta = null)
     {
         using var deadline = CancellationTokenSource.CreateLinkedTokenSource(ct);
         deadline.CancelAfter(batchTimeout ?? TimeSpan.FromSeconds(80));
@@ -140,6 +147,7 @@ public sealed partial class CodexAppServer : IAsyncDisposable
         string? threadId = null;
         string? turnId = null;
         string? finalText = null;
+        string? finalItemId = null;
         JsonElement? usage = null;
         bool started = false, completed = false, explicitFinal = false;
 
@@ -205,8 +213,15 @@ public sealed partial class CodexAppServer : IAsyncDisposable
                     var itemType = Text(item, "type");
                     if (itemType is not ("userMessage" or "agentMessage" or "reasoning" or "contextCompaction"))
                         throw new InvalidOperationException("Codex 请求了知识库模式不允许的操作。");
-                    if (method != "item/completed" || itemType != "agentMessage" ||
-                        Text(item, "phase") is not (null or "final_answer")) return;
+                    if (itemType != "agentMessage") return;
+                    var phase = Text(item, "phase");
+                    if (method == "item/started"
+                        ? onDelta is null || completed || phase != "final_answer"
+                        : phase is not (null or "final_answer")) return;
+                }
+                else if (method == "item/agentMessage/delta")
+                {
+                    if (onDelta is null || completed) return;
                 }
                 else if (method is not ("turn/completed" or "thread/tokenUsage/updated") &&
                     !(strictModel && method is "model/rerouted" or "error")) return;
@@ -219,8 +234,26 @@ public sealed partial class CodexAppServer : IAsyncDisposable
                 }
                 switch (method)
                 {
+                    case "item/started":
+                        var startedItem = Field(data, "item");
+                        finalItemId = Text(startedItem, "id");
+                        if (finalItemId is not null && Text(startedItem, "text") is { Length: > 0 } initial)
+                        {
+                            ct.ThrowIfCancellationRequested();
+                            onDelta?.Invoke(initial);
+                        }
+                        break;
+                    case "item/agentMessage/delta":
+                        if (finalItemId is not null && Text(data, "itemId") == finalItemId &&
+                            Text(data, "delta") is { Length: > 0 } delta)
+                        {
+                            ct.ThrowIfCancellationRequested();
+                            onDelta?.Invoke(delta);
+                        }
+                        break;
                     case "item/completed":
                         var item = Field(data, "item");
+                        if (Text(item, "id") == finalItemId) finalItemId = null;
                         var isFinal = Text(item, "phase") == "final_answer";
                         if (isFinal || !explicitFinal)
                         {
@@ -258,6 +291,7 @@ public sealed partial class CodexAppServer : IAsyncDisposable
                 throw;
             }
             while (!completed) Observe(await ReadMessageAsync(ct).ConfigureAwait(false));
+            ct.ThrowIfCancellationRequested();
             JsonElement result;
             var parsed = false;
             try

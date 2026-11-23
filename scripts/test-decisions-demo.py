@@ -265,6 +265,12 @@ def main():
         shutil.copytree(codex_fixture.parent, fixture_folder)
         executable = fixture_folder / codex_fixture.name
         (fixture_folder / "mode.txt").write_text("normal", encoding="utf-8")
+        events = fixture_folder / "events.jsonl"
+        stream = subprocess.run([str(executable), "--probe-stream"], timeout=25,
+                                capture_output=True, text=True, encoding="utf-8")
+        assert stream.returncode == 0, stream.stdout + stream.stderr
+        assert json.loads(events.read_text(encoding="utf-8").splitlines()[-1])["phase"] == "interrupt"
+        print(stream.stdout, end="")
         provider.calls = []
         provider.cancel_started, provider.cancelled = threading.Event(), threading.Event()
         service = threading.Thread(target=provider.serve_forever, daemon=True)
@@ -281,7 +287,6 @@ def main():
                    DecisionsDemo__DeepSeekEndpoint=f"http://127.0.0.1:{provider.server_port}/",
                    DecisionsDemo__CodexReleaseDate="2026-01-01", DecisionsDemo__DeepSeekReleaseDate="2026-01-01",
                    NO_PROXY="127.0.0.1,localhost")
-        events = fixture_folder / "events.jsonl"
         try:
             with run_demo(demo, stage, port, env):
                 verify_backend(port, "codex", MODELS["codex"])

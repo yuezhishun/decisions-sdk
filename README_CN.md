@@ -12,7 +12,7 @@
 ## 安装
 
 ```shell
-dotnet add package Decisions.Codex --version 1.0.1
+dotnet add package Decisions.Codex --version 1.1.0
 dotnet add package DeepSeek.Decisions --version 1.2.1
 ```
 
@@ -43,8 +43,8 @@ dotnet test test/DeepSeek.Decisions.IntegrationTests -c Release
 在 NuGet 配置 `yuezhishun/decisions-sdk` 的 `publish-nuget.yml` 为 Trusted Publisher，并授权目标包。首次发布 `Decisions.Codex` 需授权新包。手动验证通过后创建并推送对应的注释标签。NuGet 确认可下载后，再创建带中英文说明的 GitHub Release，标题用版本号。
 
 ```shell
-git tag -a Decisions.Codex/v1.0.1 -m "Decisions.Codex 1.0.1"
-git push origin Decisions.Codex/v1.0.1
+git tag -a Decisions.Codex/v1.1.0 -m "Decisions.Codex 1.1.0"
+git push origin Decisions.Codex/v1.1.0
 
 git tag -a DeepSeek.Decisions/v1.2.1 -m "DeepSeek.Decisions 1.2.1"
 git push origin DeepSeek.Decisions/v1.2.1

@@ -12,7 +12,7 @@ See the [Chinese guide](README_CN.md), the [dual-protocol demo](samples/Decision
 ## Installation
 
 ```shell
-dotnet add package Decisions.Codex --version 1.0.1
+dotnet add package Decisions.Codex --version 1.1.0
 dotnet add package DeepSeek.Decisions --version 1.2.1
 ```
 
